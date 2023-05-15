@@ -2,24 +2,12 @@
 #![feature(async_fn_in_trait)]
 
 use core::fmt::Debug;
-use std::{time::Duration, any::type_name};
-use tokio::{sync::mpsc::{Sender, Receiver, channel}, join};
+use std::{any::type_name, time::Duration};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-struct Bidir<TO, FROM> {
-    to: Sender<TO>,
-    from: Receiver<FROM>,
-}
-
-impl<TO: Debug, FROM: Debug> Bidir<TO, FROM> {
-    async fn send(&mut self, to: TO) -> Result<(), ()> {
-        // println!("sending: {to:?}");
-        self.to.send(to).await.map_err(drop)
-    }
-
-    async fn recv(&mut self) -> Result<FROM, ()> {
-        self.from.recv().await.ok_or(())
-    }
-}
+//
+// The trait specifies all the "state transitions" of both devices
+//
 
 trait TraitMachine {
     const SECTOR_SIZE: usize;
@@ -34,6 +22,11 @@ trait TraitMachine {
     async fn boot(&mut self) -> Result<(), ()>;
     async fn abort(&mut self) -> Result<(), ()>;
 }
+
+//
+// These functions are the actual "state logic", shared by both the host and
+// the client.
+//
 
 async fn bootload<TM: TraitMachine>(tm: &mut TM) -> Result<(), ()> {
     // Silly top level function just so we can guarantee an abort message is sent
@@ -69,19 +62,19 @@ async fn bootload_inner<TM: TraitMachine>(tm: &mut TM) -> Result<(), ()> {
     Ok(())
 }
 
+//
+// These are the "wire types" for H->C and C->H comms
+//
+
 #[derive(Debug)]
 enum Host2Client {
-    Start {
-        total_size: usize,
-    },
+    Start { total_size: usize },
     EraseSector { addr: usize, len: usize },
-    WriteData {
-        addr: usize,
-        data: Vec<u8>,
-    },
+    WriteData { addr: usize, data: Vec<u8> },
     Boot,
     Abort,
 }
+
 #[derive(Debug)]
 enum Client2Host {
     ErrorReset,
@@ -91,14 +84,16 @@ enum Client2Host {
     Booting,
 }
 
+//
+// This is the host - it is driving the state machine.
+//
+// This is a vaguely RPC-like construct.
+//
+
 struct Host {
     image: Vec<u8>,
     channel: Bidir<Host2Client, Client2Host>,
     position: usize,
-}
-
-impl Host {
-
 }
 
 impl TraitMachine for Host {
@@ -115,7 +110,11 @@ impl TraitMachine for Host {
     }
 
     async fn start(&mut self) -> Result<usize, ()> {
-        self.channel.send(Host2Client::Start { total_size: self.image.len() }).await?;
+        self.channel
+            .send(Host2Client::Start {
+                total_size: self.image.len(),
+            })
+            .await?;
         match self.channel.recv().await? {
             Client2Host::Starting => Ok(self.image.len()),
             _ => Err(()),
@@ -124,7 +123,9 @@ impl TraitMachine for Host {
 
     async fn erase_sector(&mut self, start: usize, len: usize) -> Result<(), ()> {
         assert_eq!(len, Self::SECTOR_SIZE);
-        self.channel.send(Host2Client::EraseSector { addr: start, len }).await?;
+        self.channel
+            .send(Host2Client::EraseSector { addr: start, len })
+            .await?;
         match self.channel.recv().await? {
             Client2Host::SectorErased => Ok(()),
             _ => Err(()),
@@ -138,14 +139,18 @@ impl TraitMachine for Host {
         } else {
             let remain = &self.image[self.position..][..Self::CHUNK_SIZE];
             let data = remain.iter().copied().collect();
-            self.channel.send(Host2Client::WriteData { addr: self.position, data }).await?;
+            self.channel
+                .send(Host2Client::WriteData {
+                    addr: self.position,
+                    data,
+                })
+                .await?;
             self.position += Self::CHUNK_SIZE;
             match self.channel.recv().await? {
                 Client2Host::ChunkWritten => Ok(Self::CHUNK_SIZE),
-                _ => Err(())
+                _ => Err(()),
             }
         }
-
     }
 
     async fn boot(&mut self) -> Result<(), ()> {
@@ -162,38 +167,15 @@ impl TraitMachine for Host {
     }
 }
 
+//
+// This is the client. It is being commanded by the host
+//
+
 struct Client {
     position: usize,
     image_len: Option<usize>,
     flash: Vec<u8>,
     channel: Bidir<Client2Host, Host2Client>,
-}
-
-// Pretend these are real methods
-impl Client {
-    const TOTAL_SIZE: usize = 32 * 1024;
-
-    async fn sector_erase(&mut self, start: usize, len: usize) -> Result<(), ()> {
-        println!("Totally erasing real flash...");
-        self.flash.get_mut(start..(start + len))
-            .ok_or(())?
-            .iter_mut()
-            .for_each(|b| *b = 0xFF);
-        Ok(())
-    }
-
-    async fn chunk_write(&mut self, start: usize, data: &[u8]) -> Result<(), ()> {
-        let len = data.len();
-        self.flash.get_mut(start..(start + len))
-            .ok_or(())?
-            .iter_mut()
-            .zip(data.iter())
-            .for_each(|(b, d)| {
-                assert_eq!(*b, 0xFF, "WRITING NON ERASED FLASH");
-                *b = *d;
-            });
-        Ok(())
-    }
 }
 
 impl TraitMachine for Client {
@@ -219,7 +201,7 @@ impl TraitMachine for Client {
                 self.channel.send(Client2Host::Starting).await?;
                 Ok(total_size)
             }
-            _ => Err(())
+            _ => Err(()),
         }
     }
 
@@ -231,8 +213,8 @@ impl TraitMachine for Client {
                 if !(exp_pos && exp_len) {
                     return Err(());
                 }
-            },
-            _ => return Err(())
+            }
+            _ => return Err(()),
         }
 
         self.sector_erase(sector_start, sector_len).await?;
@@ -274,6 +256,44 @@ impl TraitMachine for Client {
     }
 }
 
+//
+// These are fake "inherent methods" that would normally exist, like erasing/writing
+// the flash memory locally.
+//
+// Not part of the state machine directly, but are the "side effects" of state transitions
+// that are useful.
+impl Client {
+    const TOTAL_SIZE: usize = 32 * 1024;
+
+    async fn sector_erase(&mut self, start: usize, len: usize) -> Result<(), ()> {
+        println!("Totally erasing real flash...");
+        self.flash
+            .get_mut(start..(start + len))
+            .ok_or(())?
+            .iter_mut()
+            .for_each(|b| *b = 0xFF);
+        Ok(())
+    }
+
+    async fn chunk_write(&mut self, start: usize, data: &[u8]) -> Result<(), ()> {
+        let len = data.len();
+        self.flash
+            .get_mut(start..(start + len))
+            .ok_or(())?
+            .iter_mut()
+            .zip(data.iter())
+            .for_each(|(b, d)| {
+                assert_eq!(*b, 0xFF, "WRITING NON ERASED FLASH");
+                *b = *d;
+            });
+        Ok(())
+    }
+}
+
+//
+// Demonstration function
+//
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() {
     let image = vec![0x42; 15 * 1024];
@@ -284,12 +304,18 @@ pub async fn main() {
 
     let host = Host {
         image,
-        channel: Bidir { to: h2c.0, from: c2h.1 },
+        channel: Bidir {
+            to: h2c.0,
+            from: c2h.1,
+        },
         position: 0,
     };
     let client = Client {
         flash,
-        channel: Bidir { to: c2h.0, from: h2c.1 },
+        channel: Bidir {
+            to: c2h.0,
+            from: h2c.1,
+        },
         position: 0,
         image_len: None,
     };
@@ -315,4 +341,21 @@ pub async fn main() {
 
     assert_eq!(&host.image, &client.flash[..host.image.len()]);
     println!("Image check passed :)");
+}
+
+// Helper channel type
+struct Bidir<TO, FROM> {
+    to: Sender<TO>,
+    from: Receiver<FROM>,
+}
+
+impl<TO: Debug, FROM: Debug> Bidir<TO, FROM> {
+    async fn send(&mut self, to: TO) -> Result<(), ()> {
+        // println!("sending: {to:?}");
+        self.to.send(to).await.map_err(drop)
+    }
+
+    async fn recv(&mut self) -> Result<FROM, ()> {
+        self.from.recv().await.ok_or(())
+    }
 }

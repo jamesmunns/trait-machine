@@ -3,13 +3,6 @@
 version = 3
 
 [[package]]
-name = "async-think"
-version = "0.1.0"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -71,6 +64,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "trait-machine"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
