@@ -74,6 +74,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "trait-machine-auther"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
