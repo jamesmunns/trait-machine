@@ -25,14 +25,20 @@ pub enum Offer {
 pub trait Auther {
     async fn check_creds(&mut self) -> Result<Offer, Error>;
     async fn challenge_response(&mut self, challenge: &Challenge) -> Result<Token, Error>;
+    async fn abort(&mut self);
 }
 
 pub async fn two_factor<TM: Auther>(tm: &mut TM) -> Result<Token, Error> {
-    let outcome = tm.check_creds().await?;
-    match outcome {
-        Offer::Authenticated(token) => return Ok(token),
-        Offer::Challenge(challenge) => tm.challenge_response(&challenge).await,
+    let result = async { let outcome = tm.check_creds().await?;
+        match outcome {
+            Offer::Authenticated(token) => return Ok(token),
+            Offer::Challenge(challenge) => tm.challenge_response(&challenge).await,
+        }
+    }.await;
+    if result.is_err() {
+        tm.abort().await;
     }
+    result
 }
 
 // Wire types
@@ -87,6 +93,10 @@ where
             _ => Err(Error)
         }
     }
+
+    async fn abort(&mut self) {
+        let _ = self.comms.send(Client2Host::ErrorReset).await;
+    }
 }
 
 // Host impl
@@ -125,6 +135,10 @@ where
             }
             _ => Err(Error)
         }
+    }
+
+    async fn abort(&mut self) {
+        let _ = self.comms.send(Host2Client::ErrorReset).await;
     }
 }
 
