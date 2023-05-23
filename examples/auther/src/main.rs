@@ -29,16 +29,21 @@ pub trait Auther {
 }
 
 pub async fn two_factor<TM: Auther>(tm: &mut TM) -> Result<Token, Error> {
-    let result = async { let outcome = tm.check_creds().await?;
-        match outcome {
-            Offer::Authenticated(token) => return Ok(token),
-            Offer::Challenge(challenge) => tm.challenge_response(&challenge).await,
+    match two_factor_inner(tm).await {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            tm.abort().await;
+            Err(e)
         }
-    }.await;
-    if result.is_err() {
-        tm.abort().await;
     }
-    result
+}
+
+async fn two_factor_inner<TM: Auther>(tm: &mut TM) -> Result<Token, Error> {
+    let outcome = tm.check_creds().await?;
+    match outcome {
+        Offer::Authenticated(token) => return Ok(token),
+        Offer::Challenge(challenge) => tm.challenge_response(&challenge).await,
+    }
 }
 
 // Wire types
